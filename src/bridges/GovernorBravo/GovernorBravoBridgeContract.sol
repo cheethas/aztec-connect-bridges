@@ -6,26 +6,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {AztecTypes} from "../../aztec/libraries/AztecTypes.sol";
 import {ErrorLib} from "../base/ErrorLib.sol";
 import {BridgeBase} from "../base/BridgeBase.sol";
-import {ISubsidy} from "../../aztec/interfaces/ISubsidy.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Ideas
-// If the first bit is checked, then the aux data is to create a new shadow court voter contract
-//  - The second bit will be the vote - Not including abstain cus its dumb
-//  - The last x bytes will contain the proposalId, this will be stored within the shadow court voter contract
-//
-// If the first bit is not checked, then the aux data is to execute a vote on an existing shadow court voter contract
-//   - The proxy that they would like to vote on will be encoded in the aux data
-
-// If the 3rd bit is set then it will execute the data to vote
-
-// Maybe have a mapping in the bridge of supported protocols that can be added to later on.
-// This will allow us to be able to store less info in the proxys / deploy new vote contracts internally
-
-pragma solidity 0.8.15;
-
 // Voter proxy that votes on proposals
-interface CleisthenesVoterInterface {
+interface AthensVoterInterface {
     /// @notice Possible states that a proposal may be in
     enum ProposalState {
         Pending,
@@ -56,14 +40,14 @@ interface CleisthenesVoterInterface {
 // Factory that generates proposals
 interface AthensFactoryInterface {
     // Events
-    event CliesthenesVoterCreated(
+    event AthensVoterCreated(
         uint64 indexed auxData,
         address indexed governorAddress,
         uint256 indexed proposalId,
         address voterCloneAddress,
         uint8 vote
     );
-    event CliesthenesVoterTokenERC20Created(address indexed underlyingToken, address indexed syntheticToken);
+    event AthensVoterTokenERC20Created(address indexed underlyingToken, address indexed syntheticToken);
 
     function hasVoteExpired(address tokenAddress, uint256 voteId) external returns (bool);
 
@@ -72,47 +56,60 @@ interface AthensFactoryInterface {
         address _governorAddress,
         uint256 _proposalId,
         uint8 _vote
-    ) external returns (AthensVoter clone);
+    ) external returns (AthensVoterInterface clone);
 
     function allocateVote(uint64 _auxData, uint256 _totalInputValue) external;
 
     function voterProxies(uint64) external returns (address);
 
-    function syntheticVoterTokens(address) external returns (address);
+    function redeemVotingTokens(uint64, uint256) external returns (address);
 
-    function unwrapVotes(uint256) external returns (address);
+    function zkVoterTokens(address) external view returns (address);
 }
 
+/*//////////////////////////////////////////////////////////////
+                        Errors
+//////////////////////////////////////////////////////////////*/
 error InputAddressInvalid();
+error InputAssetBNotEmpty();
+error OutputAssetBNotEmpty();
 
 /**
- * @title An example bridge contract.
- * @author Aztec Team
- * @notice You can use this contract to immediately get back what you've deposited.
- * @dev This bridge demonstrates the flow of assets in the convert function. This bridge simply returns what has been
- *      sent to it.
+ * @title Athens Governor Bravo Bridge Contract
+ * @author Maddiaa <Twitter: @Maddiaa0, Github: @cheethas>
+ * @notice Use this contract to anonymously vote on Governor Bravo proposals
  */
 contract AthensGovernorBravoBridgeContract is BridgeBase {
-    // ISubsidy public immutable SUBSIDY;
     using SafeERC20 for IERC20;
 
+    /*//////////////////////////////////////////////////////////////
+                            State
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The Athens Factory contract, all interactions take place through it
     address public athensFactory;
 
+    /*//////////////////////////////////////////////////////////////
+                            Constructor
+    //////////////////////////////////////////////////////////////*/
     /**
      * @notice Set address of rollup processor
      * @param _rollupProcessor Address of rollup processor
+     * @param _athensFactory Address of Athens Factory
      */
     constructor(address _rollupProcessor, address _athensFactory) BridgeBase(_rollupProcessor) {
         // SUBSIDY = _subsidy;
         athensFactory = _athensFactory;
     }
 
+    /*//////////////////////////////////////////////////////////////
+                        Bridge Interactions
+    //////////////////////////////////////////////////////////////*/
+
     /**
      * @notice A function which returns an _totalInputValue amount of _inputAssetA
-     * @param _inputAssetA - Arbitrary ERC20 token
-     * @param _outputAssetA - Equal to _inputAssetA
-     * @param _rollupBeneficiary - Address of the contract which receives subsidy in case subsidy was set for a given
-     *                             criteria
+     * @param _inputAssetA - Arbitrary ERC20 Governance token -
+     * @param _outputAssetA - Equal to zkv(inputAssetA)
      * @return outputValueA - the amount of output asset to return
      * @dev In this case _outputAssetA equals _inputAssetA
      */
@@ -124,7 +121,7 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         uint256 _totalInputValue,
         uint256,
         uint64 _auxData,
-        address _rollupBeneficiary
+        address
     )
         external
         payable
@@ -137,8 +134,12 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         )
     {
         // Check the input asset is ERC20
-        if (_inputAssetA.assetType != AztecTypes.AztecAssetType.ERC20) revert ErrorLib.InvalidInputA();
-        if (_outputAssetA.erc20Address != _inputAssetA.erc20Address) revert ErrorLib.InvalidOutputA();
+        if (_inputAssetA.assetType != AztecTypes.AztecAssetType.ERC20) {
+            revert ErrorLib.InvalidInputA();
+        }
+        if (_outputAssetA.erc20Address != _inputAssetA.erc20Address) {
+            revert ErrorLib.InvalidOutputA();
+        }
 
         // Return the input value of input asset
         outputValueA = _totalInputValue;
@@ -147,23 +148,24 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         IERC20(_outputAssetA.erc20Address).approve(ROLLUP_PROCESSOR, _totalInputValue);
 
         // If the input assert if a zkv token, then we want to withdraw funds from the proxy
-        // Otherwise we would like to enter
-        (bool enter, address underlyingAddress, address zkvAddress) = _checkInputs(
-            _inputAssetA,
-            _inputAssetB,
-            _outputAssetA,
-            _outputAssetB
-        );
+        // Otherwise we would like to enter TODO: Do we still need other return types?
+        (bool enter, , ) = _checkInputs(_inputAssetA, _inputAssetB, _outputAssetA, _outputAssetB);
 
         if (enter) {
             _allocateVotes(_auxData, _totalInputValue);
         } else {
-            _withdrawVotes(_totalInputValue);
+            _withdrawVotes(_auxData, _totalInputValue);
         }
 
         return (_totalInputValue, 0, false);
     }
 
+    /** Allocate Votes
+     * @notice Batch allocate votes to a proposal
+     * @dev This function will credit the rollup with zkv tokens for the input asset
+     * @param _auxData - The proposal id
+     * @param _totalInputValue - The amount of votes to allocate
+     */
     function _allocateVotes(uint64 _auxData, uint256 _totalInputValue) internal {
         AthensFactoryInterface(athensFactory).allocateVote(
             // Allocate vote through the proxy
@@ -172,14 +174,33 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         );
     }
 
-    function _withdrawVotes(uint256 _totalInputValue) internal {
-        AthensFactoryInterface(athensFactory).unwrapVotes(_totalInputValue);
+    /** Withdraw Votes
+     * @notice Batch withdraw votes from a proposal
+     * @dev This function will swap zkvTokens for the underlying token
+     * @param _auxData - The proposal id
+     * @param _totalInputValue - The amount of votes to withdraw
+     */
+    function _withdrawVotes(uint64 _auxData, uint256 _totalInputValue) internal {
+        AthensFactoryInterface(athensFactory).redeemVotingTokens(_auxData, _totalInputValue);
     }
 
-    function getZKVToken(address _underlyingAsset) internal returns (address zkvToken) {
-        zkvToken = AthensFactoryInterface(athensFactory).syntheticVoterTokens(_underlyingAsset);
+    /** Get ZKV Token
+     * @notice Get the zkv token address from the Athens Factory for a given token
+     * @param _underlyingAsset - The underlying address
+     * @return zkvToken - The zkv token address
+     */
+    function getZKVToken(address _underlyingAsset) internal view returns (address zkvToken) {
+        zkvToken = AthensFactoryInterface(athensFactory).zkVoterTokens(_underlyingAsset);
     }
 
+    /** Check Inputs
+     * @notice Verify that the correct data has been provided by the rollup
+     * @dev Also serves to work out whether the user is wishing to remove tokens from a vote or deposit them
+     * @param _inputAssetA Input asset calldata
+     * @param _inputAssetB Input asset calldata
+     * @param _outputAssetA Output asset calldata
+     * @param _outputAssetB Output asset calldata
+     */
     function _checkInputs(
         AztecTypes.AztecAsset memory _inputAssetA,
         AztecTypes.AztecAsset memory _inputAssetB,
@@ -222,21 +243,5 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         }
 
         return (_inputAssetA.erc20Address == underlying, underlying, zkvToken);
-    }
-
-    /**
-     * @notice Computes the criteria that is passed when claiming subsidy.
-     * @param _inputAssetA The input asset
-     * @param _outputAssetA The output asset
-     * @return The criteria
-     */
-    function computeCriteria(
-        AztecTypes.AztecAsset calldata _inputAssetA,
-        AztecTypes.AztecAsset calldata,
-        AztecTypes.AztecAsset calldata _outputAssetA,
-        AztecTypes.AztecAsset calldata,
-        uint64
-    ) public view override(BridgeBase) returns (uint256) {
-        return uint256(keccak256(abi.encodePacked(_inputAssetA.erc20Address, _outputAssetA.erc20Address)));
     }
 }
