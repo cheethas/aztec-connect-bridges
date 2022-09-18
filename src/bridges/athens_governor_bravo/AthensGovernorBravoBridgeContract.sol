@@ -8,64 +8,7 @@ import {ErrorLib} from "../base/ErrorLib.sol";
 import {BridgeBase} from "../base/BridgeBase.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Voter proxy that votes on proposals
-interface AthensVoterInterface {
-    /// @notice Possible states that a proposal may be in
-    enum ProposalState {
-        Pending,
-        Active,
-        Canceled,
-        Defeated,
-        Succeeded,
-        Queued,
-        Expired,
-        Executed
-    }
-
-    function initialize(
-        address _factoryAddress,
-        address _govAddress,
-        address _tokenAddress,
-        uint256 _proposalId,
-        uint8 _vote
-    ) external;
-
-    function executeVote() external;
-
-    function delegate() external;
-
-    function underlyingToken() external returns (address);
-}
-
-// Factory that generates proposals
-interface AthensFactoryInterface {
-    // Events
-    event AthensVoterCreated(
-        uint64 indexed auxData,
-        address indexed governorAddress,
-        uint256 indexed proposalId,
-        address voterCloneAddress,
-        uint8 vote
-    );
-    event AthensVoterTokenERC20Created(address indexed underlyingToken, address indexed syntheticToken);
-
-    function hasVoteExpired(address tokenAddress, uint256 voteId) external returns (bool);
-
-    function createVoterProxy(
-        address _tokenAddress,
-        address _governorAddress,
-        uint256 _proposalId,
-        uint8 _vote
-    ) external returns (AthensVoterInterface clone);
-
-    function allocateVote(uint64 _auxData, uint256 _totalInputValue) external;
-
-    function voterProxies(uint64) external returns (address);
-
-    function redeemVotingTokens(uint64, uint256) external returns (address);
-
-    function zkVoterTokens(address) external view returns (address);
-}
+import {AthensFactoryInterface} from "./interfaces/AthensFactoryInterface.sol";
 
 /*//////////////////////////////////////////////////////////////
                         Errors
@@ -137,7 +80,7 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         if (_inputAssetA.assetType != AztecTypes.AztecAssetType.ERC20) {
             revert ErrorLib.InvalidInputA();
         }
-        if (_outputAssetA.erc20Address != _inputAssetA.erc20Address) {
+        if (_outputAssetA.erc20Address == _inputAssetA.erc20Address) {
             revert ErrorLib.InvalidOutputA();
         }
 
@@ -146,6 +89,7 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
 
         // Approve rollup processor to take input value of input asset
         IERC20(_outputAssetA.erc20Address).approve(ROLLUP_PROCESSOR, _totalInputValue);
+        IERC20(_inputAssetA.erc20Address).approve(athensFactory, _totalInputValue);
 
         // If the input assert if a zkv token, then we want to withdraw funds from the proxy
         // Otherwise we would like to enter TODO: Do we still need other return types?
@@ -189,7 +133,7 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
      * @param _underlyingAsset - The underlying address
      * @return zkvToken - The zkv token address
      */
-    function getZKVToken(address _underlyingAsset) internal view returns (address zkvToken) {
+    function getZKVToken(address _underlyingAsset) internal returns (address zkvToken) {
         zkvToken = AthensFactoryInterface(athensFactory).zkVoterTokens(_underlyingAsset);
     }
 
@@ -208,7 +152,6 @@ contract AthensGovernorBravoBridgeContract is BridgeBase {
         AztecTypes.AztecAsset memory _outputAssetB
     )
         internal
-        view
         returns (
             bool,
             address,
